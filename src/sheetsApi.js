@@ -103,6 +103,25 @@ function rowsToObjects(rows) {
   });
 }
 
+const normalizeSheetName = (value) =>
+  String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+
+function getField(record, ...names) {
+  const wanted = new Set(names.map(normalizeSheetName));
+  const entry = Object.entries(record || {}).find(([key]) => wanted.has(normalizeSheetName(key)));
+  return entry?.[1] ?? "";
+}
+
+function recordsForTab(tabs, ...aliases) {
+  const wanted = new Set(aliases.map(normalizeSheetName));
+  const tab = tabs.find((item) => wanted.has(normalizeSheetName(item.name)));
+  return rowsToObjects(tab?.rawRows || []);
+}
+
+function listValues(value) {
+  return String(value || "").split(/[;,|]/).map((item) => item.trim()).filter(Boolean);
+}
+
 // ============================================================
 // NUMBER HELPER
 // ============================================================
@@ -162,33 +181,34 @@ export async function fetchStudents() {
  * }>
  */
 
-export async function fetchMarks() {
-  const rows = await fetchRange("Marks");
-  const records = rowsToObjects(rows);
-
+function buildMarksMap(records) {
   const map = new Map();
 
   for (const record of records) {
-    const id = record.AdmissionNo;
+    const id = String(getField(record, "AdmissionNo", "AdmissionNumber")).trim();
 
     if (!id) continue;
 
     if (!map.has(id)) {
       map.set(id, {
-        name: record.StudentName || "",
-        class: record.Class || "",
+        name: getField(record, "StudentName", "Name"),
+        class: getField(record, "Class", "Grade"),
         subjects: [],
       });
     }
 
     map.get(id).subjects.push({
-      subject: record.Subject || "",
-      marks: num(record.InternalMarks),
-      max: num(record.MaxMarks),
+      subject: getField(record, "Subject"),
+      marks: num(getField(record, "InternalMarks", "Marks", "ObtainedMarks")),
+      max: num(getField(record, "MaxMarks", "MaximumMarks")),
     });
   }
 
   return map;
+}
+
+export async function fetchMarks() {
+  return buildMarksMap(rowsToObjects(await fetchRange("Marks")));
 }
 
 // ============================================================
@@ -205,14 +225,11 @@ export async function fetchMarks() {
  * MaxMarks
  */
 
-export async function fetchGraceMarks() {
-  const rows = await fetchRange("GraceMarks");
-  const records = rowsToObjects(rows);
-
+function buildGraceMap(records) {
   const map = new Map();
 
   for (const record of records) {
-    const id = record.AdmissionNo;
+    const id = String(getField(record, "AdmissionNo", "AdmissionNumber")).trim();
 
     if (!id) continue;
 
@@ -225,21 +242,25 @@ export async function fetchGraceMarks() {
 
     const entry = map.get(id);
 
-    const week = record.Week || "Week 1";
-    const category = record.Category || "General";
+    const week = getField(record, "Week") || "Week 1";
+    const category = getField(record, "Category") || "General";
 
     if (!entry.byWeek[week]) {
       entry.byWeek[week] = {};
     }
 
     entry.byWeek[week][category] =
-      num(record.ObtainedMarks);
+      num(getField(record, "ObtainedMarks", "GraceMarks", "Marks"));
 
     entry.maxPerCategory[category] =
-      num(record.MaxMarks);
+      num(getField(record, "MaxMarks", "MaximumMarks"));
   }
 
   return map;
+}
+
+export async function fetchGraceMarks() {
+  return buildGraceMap(rowsToObjects(await fetchRange("GraceMarks")));
 }
 
 // ============================================================
@@ -254,19 +275,16 @@ export async function fetchGraceMarks() {
  * PresentDays
  */
 
-export async function fetchAttendance() {
-  const rows = await fetchRange("Attendance");
-  const records = rowsToObjects(rows);
-
+function buildAttendanceMap(records) {
   const map = new Map();
 
   for (const record of records) {
-    const id = record.AdmissionNo;
+    const id = String(getField(record, "AdmissionNo", "AdmissionNumber")).trim();
 
     if (!id) continue;
 
-    const total = num(record.TotalDays);
-    const present = num(record.PresentDays);
+    const total = num(getField(record, "TotalDays", "SchoolDays"));
+    const present = num(getField(record, "PresentDays", "DaysPresent"));
 
     map.set(id, {
       totalDays: total,
@@ -279,6 +297,10 @@ export async function fetchAttendance() {
   }
 
   return map;
+}
+
+export async function fetchAttendance() {
+  return buildAttendanceMap(rowsToObjects(await fetchRange("Attendance")));
 }
 
 // ============================================================
@@ -294,93 +316,169 @@ export async function fetchAttendance() {
  * Suggestions
  */
 
-export async function fetchRemarks() {
-  const rows = await fetchRange("Remarks");
-  const records = rowsToObjects(rows);
-
+function buildRemarksMap(records) {
   const map = new Map();
 
   for (const record of records) {
-    const id = record.AdmissionNo;
+    const id = String(getField(record, "AdmissionNo", "AdmissionNumber")).trim();
 
     if (!id) continue;
 
     map.set(id, {
-      strengths: record.Strengths || "",
-      improvement: record.Improvement || "",
-      suggestions: record.Suggestions || "",
+      strengths: getField(record, "Strengths"),
+      improvement: getField(record, "Improvement", "AreasForImprovement"),
+      suggestions: getField(record, "Suggestions", "TeacherRemarks", "Remarks"),
     });
   }
 
   return map;
 }
 
+export async function fetchRemarks() {
+  return buildRemarksMap(rowsToObjects(await fetchRange("Remarks")));
+}
+
 // ============================================================
 // FETCH ALL PORTAL DATA
 // ============================================================
 
-export async function fetchAllSheetData() {
-  const [
-    students,
-    marks,
-    graceMarks,
-    attendance,
-    remarks,
-  ] = await Promise.all([
-    fetchStudents(),
-    fetchMarks(),
-    fetchGraceMarks(),
-    fetchAttendance(),
-    fetchRemarks(),
-  ]);
+function quoteTabRange(title) {
+  return `'${String(title).replace(/'/g, "''")}'!A:ZZ`;
+}
 
-  return {
-    students,
-    marks,
-    graceMarks,
-    attendance,
-    remarks,
-  };
+async function fetchWorkbookTabs() {
+  validateConfig();
+  const metadataUrl = `${BASE}/${encodeURIComponent(SHEET_ID)}?fields=sheets.properties.title&key=${encodeURIComponent(API_KEY)}`;
+  const metadataResponse = await fetch(metadataUrl);
+  if (!metadataResponse.ok) {
+    const error = await metadataResponse.json().catch(() => ({}));
+    throw new Error(error?.error?.message || `Unable to list workbook tabs (${metadataResponse.status}).`);
+  }
+
+  const metadata = await metadataResponse.json();
+  const titles = (metadata.sheets || []).map((sheet) => sheet.properties?.title).filter(Boolean);
+  if (!titles.length) throw new Error("The connected workbook has no readable tabs.");
+
+  const tabs = [];
+  for (let offset = 0; offset < titles.length; offset += 20) {
+    const batchTitles = titles.slice(offset, offset + 20);
+    const params = new URLSearchParams({
+      key: API_KEY,
+      majorDimension: "ROWS",
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+    batchTitles.forEach((title) => params.append("ranges", quoteTabRange(title)));
+
+    const valuesUrl = `${BASE}/${encodeURIComponent(SHEET_ID)}/values:batchGet?${params.toString()}`;
+    const valuesResponse = await fetch(valuesUrl);
+    if (!valuesResponse.ok) {
+      const error = await valuesResponse.json().catch(() => ({}));
+      throw new Error(error?.error?.message || `Unable to read workbook tabs (${valuesResponse.status}).`);
+    }
+
+    const result = await valuesResponse.json();
+    batchTitles.forEach((title, index) => {
+      const rawRows = result.valueRanges?.[index]?.values || [];
+      tabs.push({
+        name: title,
+        headers: (rawRows[0] || []).map((header) => String(header || "").trim()),
+        rawRows,
+        rows: rowsToObjects(rawRows),
+      });
+    });
+  }
+
+  return tabs;
+}
+
+function buildStaff(records) {
+  const staffByKey = new Map();
+  const classes = ["S1", "S2", "S3", "S4"];
+
+  for (const record of records) {
+    const username = String(getField(record, "Username", "StaffUsername")).trim();
+    const id = String(getField(record, "StaffID", "ID", "EmployeeID") || username || getField(record, "Name", "StaffName")).trim();
+    if (!id) continue;
+
+    const key = username || id;
+    const entry = staffByKey.get(key) || {
+      id,
+      name: getField(record, "Name", "StaffName"),
+      phone: getField(record, "Phone", "PhoneNumber"),
+      photo: getField(record, "Photo", "PhotoURL") || null,
+      username,
+      password: getField(record, "Password", "StaffPassword"),
+      positions: [],
+      classTeacherOf: "",
+      duties: [],
+      teachingSubjects: Object.fromEntries(classes.map((className) => [className, []])),
+    };
+
+    entry.positions = [...new Set([...entry.positions, ...String(getField(record, "Positions", "Position", "Role")).split(/[;,|]/).map((value) => value.trim()).filter(Boolean)])];
+    entry.duties = [...new Set([...entry.duties, ...String(getField(record, "Duties")).split(/[;,|]/).map((value) => value.trim()).filter(Boolean)])];
+    entry.classTeacherOf = entry.classTeacherOf || String(getField(record, "ClassTeacherOf", "ClassTeacher")).trim();
+
+    for (const className of classes) {
+      const subjects = String(getField(record, `${className}Subjects`, `${className}TeachingSubjects`)).split(/[;,|]/).map((value) => value.trim()).filter(Boolean);
+      entry.teachingSubjects[className] = [...new Set([...entry.teachingSubjects[className], ...subjects])];
+    }
+
+    const className = String(getField(record, "Class", "Grade")).trim();
+    const subject = String(getField(record, "Subject", "TeachingSubject")).trim();
+    if (classes.includes(className) && subject) {
+      entry.teachingSubjects[className] = [...new Set([...entry.teachingSubjects[className], subject])];
+    }
+
+    staffByKey.set(key, entry);
+  }
+
+  return [...staffByKey.values()];
+}
+
+export async function fetchAllSheetData() {
+  const tabs = await fetchWorkbookTabs();
+  const students = recordsForTab(tabs, "Students", "Student");
+  const staff = buildStaff(recordsForTab(tabs, "Staff", "Teachers", "Teacher", "Faculty"));
+  const marks = buildMarksMap(recordsForTab(tabs, "Marks", "Mark", "Grades", "InternalMarks"));
+  const graceMarks = buildGraceMap(recordsForTab(tabs, "GraceMarks", "GraceMark", "Grace Marks"));
+  const attendance = buildAttendanceMap(recordsForTab(tabs, "Attendance", "Attendances"));
+  const remarks = buildRemarksMap(recordsForTab(tabs, "Remarks", "Remark", "TeacherRemarks"));
+  return { tabs, students, staff, marks, graceMarks, attendance, remarks };
 }
 
 // ============================================================
 // FETCH ONE STUDENT
 // ============================================================
 
-export async function fetchStudentData(admissionNo) {
-  const [
-    marksMap,
-    graceMap,
-    attendanceMap,
-    remarksMap,
-  ] = await Promise.all([
-    fetchMarks(),
-    fetchGraceMarks(),
-    fetchAttendance(),
-    fetchRemarks(),
-  ]);
-
+export function buildStudentSheetData(admissionNo, workbookData) {
   const id = String(admissionNo).trim();
 
-  const marks = marksMap.get(id);
-  const grace = graceMap.get(id);
-  const attendance = attendanceMap.get(id);
-  const remarks = remarksMap.get(id);
+  const marks = workbookData?.marks?.get(id);
+  const grace = workbookData?.graceMarks?.get(id);
+  const attendance = workbookData?.attendance?.get(id);
+  const remarks = workbookData?.remarks?.get(id);
+  const sensitiveField = (header) => /(password|secret|api.?key|token)/i.test(String(header || ""));
+  const workbookRecords = (workbookData?.tabs || []).map((tab) => {
+    const headers = tab.headers.filter((header) => !sensitiveField(header));
+    const rows = tab.rows
+      .filter((row) => String(getField(row, "AdmissionNo", "AdmissionNumber")).trim() === id)
+      .map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => !sensitiveField(key))));
+    return { name: tab.name, headers, rows };
+  }).filter((tab) => tab.rows.length > 0);
 
-  if (!marks) {
-    return null;
-  }
+  if (!id || (!marks && !grace && !attendance && !remarks && !workbookRecords.length)) return null;
 
   // ----------------------------------------------------------
   // INTERNAL MARKS
   // ----------------------------------------------------------
 
-  const totalInternal = marks.subjects.reduce(
+  const subjectMarks = marks?.subjects || [];
+  const totalInternal = subjectMarks.reduce(
     (total, subject) => total + subject.marks,
     0
   );
 
-  const maxInternal = marks.subjects.reduce(
+  const maxInternal = subjectMarks.reduce(
     (total, subject) => total + subject.max,
     0
   );
@@ -450,10 +548,10 @@ export async function fetchStudentData(admissionNo) {
   return {
     admissionNo: id,
 
-    studentName: marks.name,
-    class: marks.class,
+    studentName: marks?.name || "",
+    class: marks?.class || "",
 
-    subjectMarks: marks.subjects,
+    subjectMarks,
 
     totalInternal,
     maxInternal,
@@ -481,7 +579,12 @@ export async function fetchStudentData(admissionNo) {
         improvement: "",
         suggestions: "",
       },
+    workbookRecords,
   };
+}
+
+export async function fetchStudentData(admissionNo) {
+  return buildStudentSheetData(admissionNo, await fetchAllSheetData());
 }
 
 // ============================================================

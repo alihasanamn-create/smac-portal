@@ -7,11 +7,11 @@ import {
 import {
   Moon, Sun, LogOut, Search, Download, Printer, Lock, Unlock,
   GraduationCap, BookOpen, Users, Award, TrendingUp, Settings,
-  ChevronRight, Upload, Plus, Save, Check, Phone, X, UserPlus,
+  ChevronRight, Upload, RefreshCw, Plus, Save, Check, Phone, X, UserPlus,
   Briefcase, Camera,
 } from "lucide-react";
 import { generateReportCardPDF } from "./reportCardPdf";
-import { fetchStudentData, fetchAllSheetData, testSheetsConnection } from "./sheetsApi";
+import { fetchStudentData, fetchAllSheetData, buildStudentSheetData } from "./sheetsApi";
 import { authenticatePortalAdmin } from "./firebase";
 
 /* ============================================================
@@ -304,6 +304,12 @@ function validateStudentIdentifiers(students, candidate, currentAdmissionNo = ""
   return "";
 }
 
+function sheetField(record, ...names) {
+  const normalize = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wanted = new Set(names.map(normalize));
+  return Object.entries(record || {}).find(([key]) => wanted.has(normalize(key)))?.[1] ?? "";
+}
+
 function nextRollNo(students, klass) {
   const inClass = students.filter((s) => s.class === klass);
   const nums = inClass.map((s) => s.rollNo || 0);
@@ -442,7 +448,7 @@ function ConfirmDialog({ title, message, onConfirm, onCancel }) {
    LOGIN SCREEN
    ============================================================ */
 
-function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeacher, dark, toggleDark }) {
+function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeacher, dark, toggleDark, onRefreshWorkbook, syncStatus, lastRefreshedAt }) {
   const [mode, setMode] = useState("parent");
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
@@ -566,6 +572,14 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
         <p className="text-[11px] text-slate-400 dark:text-slate-500 text-center mt-4">
           {hints[mode]}
         </p>
+        <div className="mt-4 border-t border-slate-100 dark:border-slate-700 pt-3 flex items-center justify-between gap-3">
+          <p role="status" className={`text-[11px] ${syncStatus?.error ? "text-red-500" : "text-slate-400 dark:text-slate-500"}`}>
+            {syncStatus?.loading ? "Loading workbook…" : syncStatus?.error ? "Workbook refresh failed" : lastRefreshedAt ? `Workbook loaded ${new Date(lastRefreshedAt).toLocaleTimeString()}` : "Workbook not loaded yet"}
+          </p>
+          <button type="button" onClick={onRefreshWorkbook} disabled={syncStatus?.loading} className="text-xs text-[#0B3D91] dark:text-[#90CAF9] font-medium inline-flex items-center gap-1.5 disabled:opacity-50">
+            <RefreshCw size={12} className={syncStatus?.loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        </div>
       </Card>
     </div>
   );
@@ -938,6 +952,78 @@ function TeacherDirectory({ staff, onEdit, onDelete }) {
       <div className="grid sm:grid-cols-2 gap-4">
         {staff.map((t) => <TeacherCard key={t.id} teacher={t} onEdit={onEdit} onDelete={onDelete} />)}
       </div>
+    </div>
+  );
+}
+
+function WorkbookTable({ headers = [], rows = [], emptyMessage = "This tab has no rows to display." }) {
+  if (!headers.length || !rows.length) {
+    return <p className="text-sm text-slate-500 dark:text-slate-400 py-4">{emptyMessage}</p>;
+  }
+
+  return (
+    <div className="overflow-auto max-h-[28rem] rounded-xl border border-slate-200 dark:border-slate-700">
+      <table className="min-w-full text-sm">
+        <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
+          <tr>{headers.map((header, index) => <th key={`${header}-${index}`} className="px-3 py-2 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{header || `Column ${index + 1}`}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex} className="border-t border-slate-100 dark:border-slate-800">
+              {headers.map((header, columnIndex) => (
+                <td key={`${header}-${columnIndex}`} className="px-3 py-2 text-slate-600 dark:text-slate-300 align-top whitespace-pre-wrap">
+                  {row[header] || "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function WorkbookTabBrowser({ tabs = [] }) {
+  const [selectedName, setSelectedName] = useState("");
+  const selected = tabs.find((tabItem) => tabItem.name === selectedName) || tabs[0];
+
+  if (!tabs.length) {
+    return <p className="text-sm text-slate-500 dark:text-slate-400">Refresh the workbook to load its tabs.</p>;
+  }
+
+  return (
+    <div className="space-y-3 mt-5">
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Workbook tabs">
+        {tabs.map((tabItem) => (
+          <button
+            key={tabItem.name}
+            role="tab"
+            aria-selected={selected?.name === tabItem.name}
+            onClick={() => setSelectedName(tabItem.name)}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium ${selected?.name === tabItem.name ? "bg-[#0B3D91] text-white" : "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200"}`}
+          >
+            {tabItem.name} <span className="opacity-75">({tabItem.rows.length})</span>
+          </button>
+        ))}
+      </div>
+      {selected && <WorkbookTable headers={selected.headers} rows={selected.rows} />}
+    </div>
+  );
+}
+
+function StudentWorkbookRecords({ records = [] }) {
+  if (!records.length) {
+    return <Card className="p-5"><p className="text-sm text-slate-500 dark:text-slate-400">No workbook rows are linked to this student yet.</p></Card>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {records.map((record) => (
+        <Card className="p-5" key={record.name}>
+          <h3 className="font-semibold text-slate-800 dark:text-slate-50 mb-3">{record.name}</h3>
+          <WorkbookTable headers={record.headers} rows={record.rows} emptyMessage="No matching rows for this student." />
+        </Card>
+      ))}
     </div>
   );
 }
@@ -1498,7 +1584,7 @@ function EditStaffModal({ teacher, onSave, onClose }) {
    ADMIN PANEL
    ============================================================ */
 
-function AdminPanel({ students, setStudents, staff, setStaff, onSyncSheets, syncStatus }) {
+function AdminPanel({ students, setStudents, staff, setStaff, onSyncSheets, syncStatus, workbookTabs, lastRefreshedAt }) {
   const [maxima, setMaxima] = useState(GRACE_CATEGORIES_MAX);
   const [published, setPublished] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
@@ -1683,16 +1769,18 @@ function AdminPanel({ students, setStudents, staff, setStaff, onSyncSheets, sync
 
       {section === "sheets" && (
         <Card className="p-5">
-          <h3 className="font-semibold text-slate-800 dark:text-slate-50 mb-3">Google Sheets Import</h3>
+          <h3 className="font-semibold text-slate-800 dark:text-slate-50 mb-3">Google Sheets Workbook</h3>
           <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
-            Connect a published Google Sheet using these columns, then sync to refresh student data automatically.
+            Every workbook tab loads when the portal opens. Refresh after changing the sheet to pull the latest data now.
           </p>
           <div className="flex flex-wrap gap-1.5 mb-4">
             {SHEET_COLUMNS.map((c) => <Pill key={c} tone="slate">{c}</Pill>)}
           </div>
-          <p className="text-xs text-slate-500 mb-3">The sheet ID and API key come from the local .env settings. Student profiles sync into this browser; marks and attendance remain in Google Sheets.</p>
-          <button onClick={onSyncSheets} className="bg-[#1E88E5] text-white text-sm font-medium px-4 py-2 rounded-xl flex items-center gap-2" disabled={syncStatus?.loading}><Upload size={14} /> {syncStatus?.loading ? "Syncing…" : "Test and sync now"}</button>
+          <p className="text-xs text-slate-500 mb-3">Students, marks, grace marks, attendance, remarks, and staff tabs update their matching portal views. Other tabs are browsable here, and rows with an AdmissionNo appear in the student’s School Records.</p>
+          <button onClick={onSyncSheets} className="bg-[#1E88E5] text-white text-sm font-medium px-4 py-2 rounded-xl flex items-center gap-2" disabled={syncStatus?.loading}><RefreshCw size={14} className={syncStatus?.loading ? "animate-spin" : ""} /> {syncStatus?.loading ? "Refreshing workbook…" : "Refresh workbook"}</button>
+          {lastRefreshedAt && <p className="text-xs text-slate-500 mt-3">Last refreshed: {new Date(lastRefreshedAt).toLocaleString()}</p>}
           {syncStatus?.message && <p role="status" className={`text-sm mt-3 ${syncStatus.error ? "text-red-600" : "text-emerald-700"}`}>{syncStatus.message}</p>}
+          <WorkbookTabBrowser tabs={workbookTabs || []} />
         </Card>
       )}
 
@@ -1762,6 +1850,8 @@ export default function App() {
   const [tab, setTab] = useState("overview");
   const [query, setQuery] = useState("");
   const [sheetData, setSheetData] = useState(null);     // live data fetched from Google Sheets
+  const [workbookData, setWorkbookData] = useState(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
   const [sheetLoading, setSheetLoading] = useState(false);
 
   const [students, setStudents] = useState(() => readSavedList("smac-portal.students.v1", initialStudents).map(({ gender, ...student }) => student));
@@ -1800,11 +1890,13 @@ export default function App() {
     // Fetch live data from Google Sheets
     try {
       setSheetLoading(true);
-      const data = await fetchStudentData(student.admissionNo);
-      if (data) setSheetData(data);   // updates all marks/grace/attendance/remarks live
+      const data = workbookData
+        ? buildStudentSheetData(student.admissionNo, workbookData)
+        : await fetchStudentData(student.admissionNo);
+      setSheetData(data);
     } catch (err) {
       console.error("Sheets fetch failed:", err.message);
-      // Falls back to demo data already shown — no disruption to the user
+      setSheetData(null);
     } finally {
       setSheetLoading(false);
     }
@@ -1817,31 +1909,74 @@ export default function App() {
   }
 
   async function syncSheets() {
-    setSyncStatus({ loading: true, message: "Checking Google Sheets…", error: false });
-    const connection = await testSheetsConnection();
-    if (!connection.success) {
-      setSyncStatus({ loading: false, message: connection.message, error: true });
-      return;
-    }
+    setSyncStatus({ loading: true, message: "Loading workbook tabs…", error: false });
     try {
       const data = await fetchAllSheetData();
       const existing = new Map(students.map((student) => [String(student.admissionNo).trim(), student]));
-      const imported = data.students.filter((row) => row.AdmissionNo?.trim()).map((row) => {
-        const admissionNo = row.AdmissionNo.trim();
+      const imported = data.students.map((row) => {
+        const admissionNo = String(sheetField(row, "AdmissionNo", "AdmissionNumber")).trim();
+        if (!admissionNo) return null;
         const previous = existing.get(admissionNo) || {};
-        const klass = CLASS_LIST.includes(row.Class) ? row.Class : previous.class || "S1";
-        const roll = Number(row.RollNo || row.RollNumber || previous.rollNo) || nextRollNo(students, klass);
-        const username = previous.username && previous.username !== previous.admissionNo ? previous.username : row.StudentUsername?.trim() || admissionNo;
-        const password = previous.password && previous.password !== previous.admissionNo ? previous.password : row.StudentPassword || admissionNo;
-        return { ...previous, admissionNo, enrollmentNo: row.EnrollmentNo?.trim() || previous.enrollmentNo || "", username, name: row.StudentName?.trim() || previous.name || "", class: klass, division: row.Division?.trim() || previous.division || "A", year: row.AcademicYear?.trim() || previous.year || "2026-27", rollNo: roll, parentName: row.ParentName?.trim() || row.GuardianName?.trim() || previous.parentName || "", parentPhone: row.ParentPhone?.trim() || previous.parentPhone || "", password, active: row.Status?.toLowerCase() === "inactive" ? false : previous.active ?? true };
-      });
+        const klassValue = String(sheetField(row, "Class", "Grade")).trim();
+        const klass = CLASS_LIST.includes(klassValue) ? klassValue : previous.class || "S1";
+        const roll = Number(sheetField(row, "RollNo", "RollNumber") || previous.rollNo) || nextRollNo(students, klass);
+        const username = String(sheetField(row, "StudentUsername", "Username")).trim() || previous.username || admissionNo;
+        const password = String(sheetField(row, "StudentPassword", "Password")).trim() || previous.password || admissionNo;
+        const status = String(sheetField(row, "Status")).trim().toLowerCase();
+        return {
+          ...previous,
+          admissionNo,
+          enrollmentNo: String(sheetField(row, "EnrollmentNo")).trim() || previous.enrollmentNo || "",
+          username,
+          name: String(sheetField(row, "StudentName", "Name")).trim() || previous.name || "",
+          class: klass,
+          division: String(sheetField(row, "Division")).trim() || previous.division || "A",
+          year: String(sheetField(row, "AcademicYear", "Year")).trim() || previous.year || "2026-27",
+          rollNo: roll,
+          parentName: String(sheetField(row, "ParentName", "GuardianName")).trim() || previous.parentName || "",
+          parentPhone: String(sheetField(row, "ParentPhone", "GuardianPhone")).trim() || previous.parentPhone || "",
+          password,
+          active: status ? status !== "inactive" : previous.active ?? true,
+        };
+      }).filter(Boolean);
       const importedNos = new Set(imported.map((student) => student.admissionNo));
-      setStudents((current) => [...current.filter((student) => !importedNos.has(student.admissionNo)), ...imported]);
-      setSyncStatus({ loading: false, message: `Synced ${imported.length} student profiles and confirmed the academic-data tabs are reachable.`, error: false });
+      if (imported.length) {
+        const refreshedStudents = [...students.filter((student) => !importedNos.has(student.admissionNo)), ...imported];
+        setStudents(refreshedStudents);
+        setActiveStudent((current) => current ? refreshedStudents.find((item) => item.admissionNo === current.admissionNo) || current : current);
+      }
+
+      if (data.staff.length) {
+        const oldStaff = new Map(staff.map((person) => [person.username || person.id, person]));
+        const refreshedStaff = data.staff.map((person) => {
+          const previous = oldStaff.get(person.username || person.id) || {};
+          return {
+            ...previous,
+            ...person,
+            positions: person.positions.length ? person.positions : previous.positions || [],
+            duties: person.duties.length ? person.duties : previous.duties || [],
+            teachingSubjects: Object.fromEntries(CLASS_LIST.map((klass) => [
+              klass,
+              person.teachingSubjects[klass]?.length ? person.teachingSubjects[klass] : previous.teachingSubjects?.[klass] || [],
+            ])),
+          };
+        });
+        setStaff(refreshedStaff);
+        setActiveTeacher((current) => current ? refreshedStaff.find((person) => person.username === current.username || person.id === current.id) || current : current);
+      }
+
+      setWorkbookData(data);
+      if (activeStudent) setSheetData(buildStudentSheetData(activeStudent.admissionNo, data));
+      setLastRefreshedAt(new Date().toISOString());
+      setSyncStatus({ loading: false, message: `Loaded ${data.tabs.length} workbook tabs, ${imported.length} students, and ${data.staff.length} staff records.`, error: false });
     } catch (error) {
       setSyncStatus({ loading: false, message: error?.message || "Unable to sync Google Sheets.", error: true });
     }
   }
+
+  useEffect(() => {
+    syncSheets();
+  }, []);
 
   async function loginAdmin(username, password) {
     await authenticatePortalAdmin(username, password);
@@ -1875,6 +2010,9 @@ export default function App() {
           onLoginTeacher={loginTeacher}
           dark={dark}
           toggleDark={() => setDark((d) => !d)}
+          onRefreshWorkbook={syncSheets}
+          syncStatus={syncStatus}
+          lastRefreshedAt={lastRefreshedAt}
         />
       </div>
     );
@@ -1900,6 +2038,10 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              <button onClick={syncSheets} disabled={syncStatus.loading} className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs hover:bg-white/10 disabled:opacity-60" aria-label="Refresh workbook data" title={lastRefreshedAt ? `Last refreshed ${new Date(lastRefreshedAt).toLocaleTimeString()}` : "Refresh workbook data"}>
+                <RefreshCw size={14} className={syncStatus.loading ? "animate-spin" : ""} />
+                <span className="hidden sm:inline">{syncStatus.loading ? "Loading…" : "Refresh"}</span>
+              </button>
               <button onClick={() => setDark((d) => !d)} className="p-2 rounded-full hover:bg-white/10" aria-label="Toggle dark mode">
                 {dark ? <Sun size={16} /> : <Moon size={16} />}
               </button>
@@ -1914,7 +2056,7 @@ export default function App() {
               ? [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["admin", "Admin Panel"]]
               : user === "teacher"
               ? [["overview", "My Profile"], ["teachers", "Staff Directory"]]
-              : [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["remarks", "Remarks"], ["account", "Account"]]
+              : [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["remarks", "Remarks"], ["records", "School Records"], ["account", "Account"]]
             ).map(([key, label]) => (
               <button
                 key={key}
@@ -2047,9 +2189,10 @@ export default function App() {
           )}
           {tab === "teachers" && user !== "teacher" && <TeacherDirectory staff={staff} />}
           {tab === "remarks" && user !== "teacher" && <TeacherRemarks remarks={remarksLive} />}
+          {tab === "records" && user === "parent" && <StudentWorkbookRecords records={sheetData?.workbookRecords || []} />}
           {tab === "account" && user === "parent" && activeStudent && <ParentAccount student={activeStudent} onChangePassword={changeParentPassword} />}
           {tab === "admin" && user === "admin" && (
-            <AdminPanel students={students} setStudents={setStudents} staff={staff} setStaff={setStaff} onSyncSheets={syncSheets} syncStatus={syncStatus} />
+            <AdminPanel students={students} setStudents={setStudents} staff={staff} setStaff={setStaff} onSyncSheets={syncSheets} syncStatus={syncStatus} workbookTabs={workbookData?.tabs || []} lastRefreshedAt={lastRefreshedAt} />
           )}
         </main>
 
