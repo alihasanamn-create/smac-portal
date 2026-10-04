@@ -33,7 +33,10 @@ export async function authenticatePortalAdmin(username, password) {
   if (!firebaseAuth || !firestore) {
     throw new Error("Firebase configuration is missing from src/firebase.js.");
   }
-  const email = `${String(username).trim().toLowerCase()}@${firebaseConfig.projectId}.firebaseapp.com`;
+  const login = String(username).trim();
+  const email = login.includes("@")
+    ? login.toLowerCase()
+    : `${login.toLowerCase()}@${firebaseConfig.projectId}.firebaseapp.com`;
   const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
   const account = await getDoc(doc(firestore, "accounts", credential.user.uid));
   if (!account.exists() || account.data().role !== "admin") {

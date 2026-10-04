@@ -488,13 +488,13 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
   const placeholders = {
     parent: "Username — admission number by default",
     teacher: "Username — e.g. ali.hasan",
-    admin: "Username",
+    admin: "Firebase email or portal username",
   };
 
   const hints = {
     parent: "Username and password start as the admission number. Parents can change their password after signing in.",
     teacher: "Use the username and password set during your account creation.",
-    admin: "Use the admin Firebase Authentication account set up for this portal.",
+    admin: "Use the exact email and password from Firebase Authentication. A username is supported for portal accounts using the project domain.",
   };
 
   return (
@@ -542,7 +542,7 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
         <form onSubmit={submit} className="space-y-4">
           <div>
             <label className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              {mode === "parent" ? "Admission Number" : "Username"}
+              {mode === "parent" ? "Admission Number" : mode === "admin" ? "Firebase email or username" : "Username"}
             </label>
             <input
               value={id}
