@@ -8,11 +8,17 @@
 
 1. Go to https://sheets.google.com and create a new spreadsheet.
 2. Name it: **SMAC Portal Data**
-3. Create these 4 tabs (click the + at the bottom to add tabs):
+3. Create these 5 tabs (click the + at the bottom to add tabs):
+
+#### Tab 1: Students
+Row 1 (headers, exact spelling):
+| AdmissionNo | EnrollmentNo | StudentName | Class | Division | RollNo | AcademicYear | ParentName | ParentPhone | StudentUsername | StudentPassword | Status |
+
+Use `Active` or `Inactive` in Status. Student profile changes made in the admin panel are saved in that browser; this sheet can also supply profile records during sync.
 
 ---
 
-#### Tab 1: Marks
+#### Tab 2: Marks
 Row 1 (headers, exact spelling):
 | AdmissionNo | StudentName | Class | Subject | InternalMarks | MaxMarks |
 
@@ -23,7 +29,7 @@ Example rows:
 
 ---
 
-#### Tab 2: GraceMarks
+#### Tab 3: GraceMarks
 Row 1 (headers):
 | AdmissionNo | Week | Category | ObtainedMarks | MaxMarks |
 
@@ -34,7 +40,7 @@ Example rows:
 
 ---
 
-#### Tab 3: Attendance
+#### Tab 4: Attendance
 Row 1 (headers):
 | AdmissionNo | TotalDays | PresentDays |
 
@@ -44,7 +50,7 @@ Example rows:
 
 ---
 
-#### Tab 4: Remarks
+#### Tab 5: Remarks
 Row 1 (headers):
 | AdmissionNo | Strengths | Improvement | Suggestions |
 
@@ -105,14 +111,16 @@ Copy that long string. You'll paste it into the code.
 
 ---
 
-### STEP 6 — Paste your credentials into the code
+### STEP 6 — Configure the local environment
 
-Open `src/sheetsApi.js` and replace the two placeholder lines:
+Create a `.env` file in the project root (it is ignored by Git) with:
 
 ```js
-const SHEET_ID = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms";  // your real ID
-const API_KEY  = "AIzaSyB_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";          // your real key
+VITE_GOOGLE_SHEET_ID=your_sheet_id
+VITE_GOOGLE_SHEETS_API_KEY=your_api_key
 ```
+
+Restart the Vite development server after changing `.env`. The API key is included in the browser app, so restrict it to the Google Sheets API and your site / local development referrers. Never use a service-account secret in this file.
 
 ---
 

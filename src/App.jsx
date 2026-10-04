@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -11,7 +11,8 @@ import {
   Briefcase, Camera,
 } from "lucide-react";
 import { generateReportCardPDF } from "./reportCardPdf";
-import { fetchStudentData } from "./sheetsApi";
+import { fetchStudentData, fetchAllSheetData, testSheetsConnection } from "./sheetsApi";
+import { authenticatePortalAdmin } from "./firebase";
 
 /* ============================================================
    STATIC REFERENCE DATA
@@ -23,6 +24,27 @@ const SHEET_COLUMNS = [
 ];
 
 const CLASS_LIST = ["S1", "S2", "S3", "S4"];
+
+const STUDENT_RECORD_SECTIONS = [
+  { id: "profile", label: "Profile", fields: [] },
+  { id: "parentDetails", label: "Parent Details", fields: [{ key: "relationship", label: "Relationship to student" }, { key: "alternatePhone", label: "Alternate Phone" }, { key: "address", label: "Home Address", multiline: true }] },
+  { id: "feeDetails", label: "Fee Details", fields: [{ key: "feePlan", label: "Fee Plan" }, { key: "totalFee", label: "Total Fee" }, { key: "paidFee", label: "Amount Paid" }, { key: "balance", label: "Balance" }, { key: "feeNotes", label: "Payment Notes", multiline: true }] },
+  { id: "attendanceDetails", label: "Attendance Details", fields: [{ key: "totalDays", label: "School Days" }, { key: "presentDays", label: "Days Present" }, { key: "absentDays", label: "Days Absent" }, { key: "attendanceNotes", label: "Attendance Notes", multiline: true }] },
+  { id: "documents", label: "Documents", fields: [{ key: "documents", label: "Document checklist / notes", multiline: true }] },
+  { id: "previousAcademicDetails", label: "Previous Academic Details", fields: [{ key: "previousInstitution", label: "Previous Institution" }, { key: "previousClass", label: "Previous Class" }, { key: "previousYear", label: "Academic Year" }, { key: "previousResult", label: "Result / Grade" }, { key: "previousNotes", label: "Additional Notes", multiline: true }] },
+  { id: "relatives", label: "Relatives & Siblings", fields: [{ key: "relatives", label: "Names, relationships and contact details", multiline: true }] },
+  { id: "examinations", label: "Examinations", fields: [{ key: "examinations", label: "Exam name, date and result", multiline: true }] },
+  { id: "behavior", label: "Behavior", fields: [] },
+  { id: "achievements", label: "Achievements", fields: [] },
+  { id: "certificates", label: "Certificate", fields: [{ key: "certificates", label: "Certificate name, issue date and reference", multiline: true }] },
+  { id: "timetable", label: "Time Table", fields: [{ key: "timetable", label: "Timetable / schedule notes", multiline: true }] },
+  { id: "classHistory", label: "Class History", fields: [{ key: "classHistory", label: "Academic year, class, division and roll number", multiline: true }] },
+  { id: "qualifications", label: "Qualifications And Abilities", fields: [{ key: "qualifications", label: "Qualifications, skills and abilities", multiline: true }] },
+  { id: "academicFeeSummary", label: "Academic & Fee Summary", fields: [{ key: "academicSummary", label: "Academic Summary", multiline: true }, { key: "feeSummary", label: "Fee Summary", multiline: true }] },
+  { id: "admissionHistory", label: "Admission History", fields: [{ key: "admissionDate", label: "Admission Date" }, { key: "admissionType", label: "Admission Type" }, { key: "admissionNotes", label: "History / Notes", multiline: true }] },
+  { id: "storeDetails", label: "Store Details", fields: [{ key: "storeDetails", label: "Items issued, dates and status", multiline: true }] },
+  { id: "examPerformance", label: "Exam Performance", fields: [{ key: "examPerformance", label: "Term, subject, marks, grade and remarks", multiline: true }] },
+];
 
 const CLASS_LABELS = {
   S1: "S1 — Secondary First Year",
@@ -55,7 +77,6 @@ const GRACE_CATEGORIES_MAX = {
   "Extra Activities": 10,
 };
 
-const ADMIN_CREDENTIALS = { username: "admin", password: "admin123" };
 
 /* ============================================================
    MOCK DATA — replace with Firestore + Google Sheets API calls
@@ -253,6 +274,36 @@ function nextAdmissionNo(students, year = "2026") {
   return `${year}-${String(next).padStart(3, "0")}`;
 }
 
+function readSavedList(key, fallback) {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function validateStudentIdentifiers(students, candidate, currentAdmissionNo = "") {
+  const admissionNo = String(candidate.admissionNo || "").trim().toLowerCase();
+  if (!admissionNo) return "Enter an admission number.";
+  if (students.some((s) => String(s.admissionNo).trim().toLowerCase() === admissionNo && String(s.admissionNo).trim().toLowerCase() !== String(currentAdmissionNo).trim().toLowerCase())) {
+    return "That admission number is already in use.";
+  }
+  const username = String(candidate.username || candidate.admissionNo).trim().toLowerCase();
+  if (!username) return "Enter a login username.";
+  if (students.some((s) => String(s.username || s.admissionNo).trim().toLowerCase() === username && String(s.admissionNo).trim().toLowerCase() !== String(currentAdmissionNo).trim().toLowerCase())) {
+    return "That login username is already in use.";
+  }
+  const rollNo = Number(candidate.rollNo);
+  if (!Number.isInteger(rollNo) || rollNo < 1) return "Enter a valid roll number (1 or higher).";
+  if (students.some((s) => s.admissionNo !== currentAdmissionNo && s.class === candidate.class && Number(s.rollNo) === rollNo)) {
+    return `Roll number ${rollNo} is already used in ${candidate.class}.`;
+  }
+  return "";
+}
+
 function nextRollNo(students, klass) {
   const inClass = students.filter((s) => s.class === klass);
   const nums = inClass.map((s) => s.rollNo || 0);
@@ -346,10 +397,10 @@ function MultiSelect({ options, selected, onChange }) {
   );
 }
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, wide = false }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 p-0 sm:p-4">
-      <div className="bg-white dark:bg-slate-800 w-full sm:max-w-lg sm:rounded-2xl rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
+      <div className={`bg-white dark:bg-slate-800 w-full ${wide ? "sm:max-w-4xl" : "sm:max-w-lg"} sm:rounded-2xl rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl`}>
         <div className="sticky top-0 bg-white dark:bg-slate-800 flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-700">
           <h3 className="font-semibold text-slate-800 dark:text-slate-50">{title}</h3>
           <button onClick={onClose} className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400">
@@ -397,16 +448,13 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
   const [pw, setPw] = useState("");
   const [error, setError] = useState("");
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault();
     if (!id || !pw) { setError("Please enter both fields."); return; }
 
     if (mode === "admin") {
-      if (id === ADMIN_CREDENTIALS.username && pw === ADMIN_CREDENTIALS.password) {
-        setError(""); onLoginAdmin();
-      } else {
-        setError("Incorrect admin username or password.");
-      }
+      try { setError(""); await onLoginAdmin(id.trim(), pw); }
+      catch (loginError) { setError(loginError?.message || "Unable to sign in to Firebase."); }
       return;
     }
 
@@ -419,9 +467,9 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
     }
 
     // parent / student
-    const student = students.find((s) => s.admissionNo === id.trim());
-    if (!student) { setError("No student found with that admission number."); return; }
-    if (student.password !== pw) { setError("Incorrect password."); return; }
+    const student = students.find((s) => (s.username || s.admissionNo) === id.trim() && s.active !== false);
+    if (!student) { setError("No student found with that username."); return; }
+    if ((student.password || student.admissionNo) !== pw) { setError("Incorrect password."); return; }
     setError(""); onLoginParent(student);
   }
 
@@ -432,15 +480,15 @@ function LoginScreen({ students, staff, onLoginParent, onLoginAdmin, onLoginTeac
   ];
 
   const placeholders = {
-    parent: "Admission No — e.g. 2026-001",
+    parent: "Username — admission number by default",
     teacher: "Username — e.g. ali.hasan",
     admin: "Username",
   };
 
   const hints = {
-    parent: "Both username and password are the student's admission number.",
+    parent: "Username and password start as the admission number. Parents can change their password after signing in.",
     teacher: "Use the username and password set during your account creation.",
-    admin: `Demo: ${ADMIN_CREDENTIALS.username} / ${ADMIN_CREDENTIALS.password}`,
+    admin: "Use the admin Firebase Authentication account set up for this portal.",
   };
 
   return (
@@ -557,6 +605,7 @@ function ProfileCard({ student, staff }) {
         <p className="font-bold text-slate-800 dark:text-slate-50 text-base truncate">{student.name}</p>
         <p className="text-xs text-slate-500 dark:text-slate-400">Admission No: {student.admissionNo} · Roll No: {student.rollNo}</p>
         <p className="text-xs text-slate-500 dark:text-slate-400">{CLASS_LABELS[student.class] || student.class}</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400">Enrl. No: {student.enrollmentNo || "—"} · Division: {student.division || "—"}</p>
         <div className="flex flex-wrap gap-x-3 mt-1">
           <span className="text-[11px] text-slate-400 dark:text-slate-500">
             Class Teacher: {classTeacher ? classTeacher.name : "—"}
@@ -564,6 +613,44 @@ function ProfileCard({ student, staff }) {
           <span className="text-[11px] text-slate-400 dark:text-slate-500">AY {student.year}</span>
         </div>
       </div>
+    </Card>
+  );
+}
+
+function ParentAccount({ student, onChangePassword }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [isError, setIsError] = useState(false);
+
+  function submit(event) {
+    event.preventDefault();
+    if (currentPassword !== (student.password || student.admissionNo)) {
+      setIsError(true); setMessage("Current password is incorrect."); return;
+    }
+    if (newPassword.trim().length < 6) {
+      setIsError(true); setMessage("Choose a password with at least 6 characters."); return;
+    }
+    if (newPassword !== confirmPassword) {
+      setIsError(true); setMessage("The new passwords do not match."); return;
+    }
+    onChangePassword(newPassword);
+    setCurrentPassword(""); setNewPassword(""); setConfirmPassword("");
+    setIsError(false); setMessage("Password updated.");
+  }
+
+  return (
+    <Card className="p-5">
+      <h2 className="font-semibold text-slate-800 dark:text-slate-50 mb-1">Parent account</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Username: {student.username || student.admissionNo}. You can change your password here.</p>
+      <form onSubmit={submit} className="space-y-3 max-w-md">
+        <input required type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Current password" className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+        <input required type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="New password (at least 6 characters)" className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+        <input required type="password" autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Confirm new password" className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+        <button className="bg-[#0B3D91] text-white text-sm font-medium px-4 py-2.5 rounded-xl">Update password</button>
+        {message && <p role="status" className={`text-sm ${isError ? "text-red-600" : "text-emerald-700"}`}>{message}</p>}
+      </form>
     </Card>
   );
 }
@@ -860,14 +947,17 @@ function TeacherDirectory({ staff, onEdit, onDelete }) {
    ============================================================ */
 
 function AddStudentForm({ students, onAdd }) {
+  const [admissionNo, setAdmissionNo] = useState("");
+  const [rollNo, setRollNo] = useState("");
   const [name, setName] = useState("");
   const [klass, setKlass] = useState("S1");
+  const [division, setDivision] = useState("A");
   const [year, setYear] = useState("2026-27");
+  const [parentName, setParentName] = useState("");
+  const [parentPhone, setParentPhone] = useState("");
   const [photo, setPhoto] = useState(null);
   const [createdMsg, setCreatedMsg] = useState(null);
-
-  const previewAdmissionNo = useMemo(() => nextAdmissionNo(students), [students]);
-  const previewRollNo = useMemo(() => nextRollNo(students, klass), [students, klass]);
+  const [error, setError] = useState("");
 
   function handlePhoto(e) {
     const file = e.target.files?.[0];
@@ -879,22 +969,17 @@ function AddStudentForm({ students, onAdd }) {
 
   function submit(e) {
     e.preventDefault();
-    if (!name.trim()) return;
-    const admissionNo = nextAdmissionNo(students);
-    const rollNo = nextRollNo(students, klass);
-    const student = {
-      admissionNo,
-      name: name.trim(),
-      class: klass,
-      year,
-      photo,
-      password: admissionNo, // username & password both default to admission number
-      rollNo,
-      overallPercent: computeStudentOverallPercent(), // auto-calculated from internal + grace marks
-    };
+    const student = { admissionNo: admissionNo.trim(), username: admissionNo.trim(), rollNo: Number(rollNo), name: name.trim(), class: klass, division: division.trim(), year, parentName: parentName.trim(), parentPhone: parentPhone.trim(), photo, password: admissionNo.trim(), details: {}, active: true };
+    const validationError = !student.name ? "Enter the student's name." : validateStudentIdentifiers(students, student);
+    if (validationError) { setError(validationError); return; }
+    setError("");
     onAdd(student);
     setCreatedMsg(student);
+    setAdmissionNo("");
+    setRollNo("");
     setName("");
+    setParentName("");
+    setParentPhone("");
     setPhoto(null);
   }
 
@@ -926,6 +1011,16 @@ function AddStudentForm({ students, onAdd }) {
 
         <div className="grid grid-cols-2 gap-3">
           <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">AD No (Admission Number)</label>
+            <input required value={admissionNo} onChange={(e) => setAdmissionNo(e.target.value)} placeholder="e.g. 68" className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Roll No</label>
+            <input required type="number" min="1" value={rollNo} onChange={(e) => setRollNo(e.target.value)} placeholder="e.g. 3" className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
             <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Class</label>
             <select
               value={klass}
@@ -934,6 +1029,10 @@ function AddStudentForm({ students, onAdd }) {
             >
               {CLASS_LIST.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Division</label>
+            <input value={division} onChange={(e) => setDivision(e.target.value)} placeholder="e.g. A" className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
           </div>
           <div>
             <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Academic Year</label>
@@ -945,16 +1044,9 @@ function AddStudentForm({ students, onAdd }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="flex items-center justify-between bg-slate-50 dark:bg-slate-900 rounded-xl px-3 py-2">
-            <span className="text-xs text-slate-500 dark:text-slate-400">Admission No</span>
-            <span className="text-sm font-semibold text-[#0B3D91] dark:text-[#90CAF9]">{previewAdmissionNo}</span>
-          </div>
-          <div className="flex items-center justify-between bg-slate-50 dark:bg-slate-900 rounded-xl px-3 py-2">
-            <span className="text-xs text-slate-500 dark:text-slate-400">Roll No ({klass})</span>
-            <span className="text-sm font-semibold text-[#0B3D91] dark:text-[#90CAF9]">{previewRollNo}</span>
-          </div>
-        </div>
+        <div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Parent / Guardian</label><input value={parentName} onChange={(e) => setParentName(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div>
+        <div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Parent Phone</label><input type="tel" value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div>
+        {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
 
         <button type="submit" className="bg-[#0B3D91] text-white text-sm font-medium px-4 py-2.5 rounded-xl flex items-center gap-2">
           <Plus size={14} /> Create student profile
@@ -979,11 +1071,42 @@ function AddStudentForm({ students, onAdd }) {
    ============================================================ */
 
 function EditStudentModal({ student, students, onSave, onClose }) {
+  const [admissionNo, setAdmissionNo] = useState(student.admissionNo);
+  const [enrollmentNo, setEnrollmentNo] = useState(student.enrollmentNo || "");
+  const [username, setUsername] = useState(student.username || student.admissionNo);
+  const [password, setPassword] = useState(student.password || student.admissionNo);
   const [name, setName] = useState(student.name);
   const [klass, setKlass] = useState(student.class);
+  const [division, setDivision] = useState(student.division || "A");
   const [year, setYear] = useState(student.year);
+  const [parentName, setParentName] = useState(student.parentName || "");
+  const [parentPhone, setParentPhone] = useState(student.parentPhone || "");
   const [photo, setPhoto] = useState(student.photo);
   const [rollNo, setRollNo] = useState(student.rollNo || 1);
+  const [error, setError] = useState("");
+  const [activeSection, setActiveSection] = useState("profile");
+  const [details, setDetails] = useState(student.details || {});
+
+  const recordSection = activeSection === "behavior" || activeSection === "achievements";
+  const recordColumns = activeSection === "behavior"
+    ? [{ key: "date", label: "Date", type: "date" }, { key: "misconduct", label: "Misconduct" }, { key: "actionTaken", label: "Action Taken" }, { key: "remarks", label: "Remarks" }, { key: "teacher", label: "Teacher" }]
+    : [{ key: "date", label: "Date", type: "date" }, { key: "achievement", label: "Achievement" }, { key: "details", label: "Details" }, { key: "teacher", label: "Teacher" }];
+
+  function updateRecord(index, key, value) {
+    setDetails((current) => {
+      const records = [...(current[activeSection]?.records || [])];
+      records[index] = { ...records[index], [key]: value };
+      return { ...current, [activeSection]: { ...current[activeSection], records } };
+    });
+  }
+
+  function addRecord() {
+    const record = Object.fromEntries(recordColumns.map(({ key }) => [key, ""]));
+    setDetails((current) => ({
+      ...current,
+      [activeSection]: { ...current[activeSection], records: [...(current[activeSection]?.records || []), record] },
+    }));
+  }
 
   function handlePhoto(e) {
     const file = e.target.files?.[0];
@@ -995,20 +1118,18 @@ function EditStudentModal({ student, students, onSave, onClose }) {
 
   function submit(e) {
     e.preventDefault();
-    if (!name.trim()) return;
+    const nextAdmissionNo = admissionNo.trim();
+    const updated = { ...student, admissionNo: nextAdmissionNo, enrollmentNo: enrollmentNo.trim(), username: username.trim() === student.admissionNo ? nextAdmissionNo : username.trim(), password: password === student.admissionNo ? nextAdmissionNo : password, name: name.trim(), class: klass, division: division.trim(), year, parentName: parentName.trim(), parentPhone: parentPhone.trim(), photo, rollNo: Number(rollNo), details };
+    const validationError = !updated.name ? "Enter the student's name." : validateStudentIdentifiers(students, updated, student.admissionNo);
+    if (validationError || !updated.password.trim()) { setError(validationError || "Enter a password."); return; }
     onSave({
-      ...student,
-      name: name.trim(),
-      class: klass,
-      year,
-      photo,
-      rollNo: Number(rollNo) || 1,
+      ...updated,
       overallPercent: computeStudentOverallPercent(), // auto-calculated, not editable
     });
   }
 
   return (
-    <Modal title="Edit Student" onClose={onClose}>
+    <Modal title="Student Record" onClose={onClose} wide>
       <form onSubmit={submit} className="space-y-3">
         <div className="flex items-center gap-4">
           <label className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-dashed border-slate-300 dark:border-slate-600 flex items-center justify-center text-slate-400 cursor-pointer overflow-hidden shrink-0">
@@ -1025,7 +1146,25 @@ function EditStudentModal({ student, students, onSave, onClose }) {
           </div>
         </div>
 
+        <div className="grid md:grid-cols-[175px,minmax(0,1fr)] gap-4">
+          <nav aria-label="Student record sections" className="flex md:flex-col gap-1 overflow-x-auto md:overflow-visible border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-700 pb-2 md:pb-0 md:pr-3">
+            {STUDENT_RECORD_SECTIONS.map((section) => (
+              <button type="button" key={section.id} onClick={() => setActiveSection(section.id)} className={`text-left text-xs px-3 py-2 rounded-lg whitespace-nowrap ${activeSection === section.id ? "bg-[#0B3D91] text-white" : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"}`}>
+                {section.label}
+              </button>
+            ))}
+          </nav>
+          <div className="min-w-0 space-y-3">
+          {activeSection === "profile" ? <>
         <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">AD No (Admission Number)</label>
+            <input required value={admissionNo} onChange={(e) => setAdmissionNo(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Enrl. No</label>
+            <input value={enrollmentNo} onChange={(e) => setEnrollmentNo(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+          </div>
           <div>
             <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Class</label>
             <select
@@ -1035,6 +1174,10 @@ function EditStudentModal({ student, students, onSave, onClose }) {
             >
               {CLASS_LIST.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Division</label>
+            <input value={division} onChange={(e) => setDivision(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
           </div>
           <div>
             <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Academic Year</label>
@@ -1057,9 +1200,29 @@ function EditStudentModal({ student, students, onSave, onClose }) {
           />
         </div>
 
+        {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+
         <div className="bg-slate-50 dark:bg-slate-900 rounded-xl px-3 py-2.5 flex items-center justify-between">
-          <span className="text-xs text-slate-500 dark:text-slate-400">Admission No (login username &amp; password)</span>
-          <span className="text-sm font-semibold text-[#0B3D91] dark:text-[#90CAF9]">{student.admissionNo}</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">Admission No is the default for username and password</span>
+        </div>
+        <div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Login Username</label><input required value={username} onChange={(e) => setUsername(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div>
+        <div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Login Password</label><input required type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div>
+        </> : <>
+          {activeSection === "parentDetails" && <><div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Parent / Guardian</label><input value={parentName} onChange={(e) => setParentName(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div><div><label className="text-xs font-medium text-slate-500 dark:text-slate-400">Parent Phone</label><input type="tel" value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /></div></>}
+          {recordSection ? <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-slate-500 dark:text-slate-400">Add dated {activeSection === "behavior" ? "behavior records" : "student achievements"} for this student.</p>
+              <button type="button" onClick={addRecord} className="shrink-0 rounded-lg bg-[#0B3D91] px-3 py-2 text-xs font-medium text-white flex items-center gap-1"><Plus size={14} /> Add</button>
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+              <table className="w-full min-w-[680px] text-left text-sm">
+                <thead className="bg-[#05bfc2] text-white"><tr>{recordColumns.map((column) => <th key={column.key} className="px-3 py-2.5 font-semibold">{column.label}</th>)}</tr></thead>
+                <tbody>{(details[activeSection]?.records || []).length === 0 ? <tr><td colSpan={recordColumns.length} className="px-3 py-6 text-center text-sm text-slate-400">No records yet. Select Add to enter one.</td></tr> : (details[activeSection]?.records || []).map((record, index) => <tr key={index} className="border-t border-slate-200 dark:border-slate-700">{recordColumns.map((column) => <td key={column.key} className="p-2"><input type={column.type || "text"} value={record[column.key] || ""} onChange={(e) => updateRecord(index, column.key, e.target.value)} aria-label={column.label} className="w-full min-w-24 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1.5 text-sm" /></td>)}</tr>)}</tbody>
+              </table>
+            </div>
+          </div> : STUDENT_RECORD_SECTIONS.find((section) => section.id === activeSection)?.fields.map((field) => <div key={field.key}><label className="text-xs font-medium text-slate-500 dark:text-slate-400">{field.label}</label>{field.multiline ? <textarea rows={4} value={details[activeSection]?.[field.key] || ""} onChange={(e) => setDetails((current) => ({ ...current, [activeSection]: { ...current[activeSection], [field.key]: e.target.value } }))} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" /> : <input value={details[activeSection]?.[field.key] || ""} onChange={(e) => setDetails((current) => ({ ...current, [activeSection]: { ...current[activeSection], [field.key]: e.target.value } }))} className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />}</div>)}
+        </>}
+          </div>
         </div>
 
         <div className="flex gap-2 pt-1">
@@ -1335,7 +1498,7 @@ function EditStaffModal({ teacher, onSave, onClose }) {
    ADMIN PANEL
    ============================================================ */
 
-function AdminPanel({ students, setStudents, staff, setStaff }) {
+function AdminPanel({ students, setStudents, staff, setStaff, onSyncSheets, syncStatus }) {
   const [maxima, setMaxima] = useState(GRACE_CATEGORIES_MAX);
   const [published, setPublished] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
@@ -1372,7 +1535,7 @@ function AdminPanel({ students, setStudents, staff, setStaff }) {
   function confirmDoDelete() {
     if (!confirmDelete) return;
     if (confirmDelete.type === "student") {
-      setStudents((prev) => prev.filter((s) => s.admissionNo !== confirmDelete.item.admissionNo));
+      setStudents((prev) => prev.map((s) => s.admissionNo === confirmDelete.item.admissionNo ? { ...s, active: false } : s));
     } else {
       setStaff((prev) => prev.filter((t) => t.id !== confirmDelete.item.id));
     }
@@ -1412,7 +1575,7 @@ function AdminPanel({ students, setStudents, staff, setStaff }) {
 
       {section === "students" && (
         <div className="space-y-5">
-          <AddStudentForm students={students} onAdd={(s) => setStudents((prev) => [...prev, s])} />
+          <AddStudentForm students={students.filter((s) => s.active !== false)} onAdd={(s) => setStudents((prev) => [...prev, s])} />
           <Card className="p-5">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <h3 className="font-semibold text-slate-800 dark:text-slate-50">All Students ({visibleStudents.length})</h3>
@@ -1461,10 +1624,10 @@ function AdminPanel({ students, setStudents, staff, setStaff }) {
                       Edit
                     </button>
                     <button
-                      onClick={() => deleteStudent(s)}
+                      onClick={() => setStudents((prev) => prev.map((item) => item.admissionNo === s.admissionNo ? { ...item, active: item.active === false } : item))}
                       className="text-xs font-medium text-red-500 dark:text-red-400 px-2 py-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition"
                     >
-                      Delete
+                      {s.active === false ? "Reactivate" : "Deactivate"}
                     </button>
                   </div>
                 </div>
@@ -1527,14 +1690,9 @@ function AdminPanel({ students, setStudents, staff, setStaff }) {
           <div className="flex flex-wrap gap-1.5 mb-4">
             {SHEET_COLUMNS.map((c) => <Pill key={c} tone="slate">{c}</Pill>)}
           </div>
-          <div className="flex gap-2 flex-wrap">
-            <button className="border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-200 text-sm font-medium px-4 py-2 rounded-xl flex items-center gap-2">
-              <Upload size={14} /> Connect Sheet URL
-            </button>
-            <button className="bg-[#1E88E5] text-white text-sm font-medium px-4 py-2 rounded-xl flex items-center gap-2">
-              Sync now
-            </button>
-          </div>
+          <p className="text-xs text-slate-500 mb-3">The sheet ID and API key come from the local .env settings. Student profiles sync into this browser; marks and attendance remain in Google Sheets.</p>
+          <button onClick={onSyncSheets} className="bg-[#1E88E5] text-white text-sm font-medium px-4 py-2 rounded-xl flex items-center gap-2" disabled={syncStatus?.loading}><Upload size={14} /> {syncStatus?.loading ? "Syncing…" : "Test and sync now"}</button>
+          {syncStatus?.message && <p role="status" className={`text-sm mt-3 ${syncStatus.error ? "text-red-600" : "text-emerald-700"}`}>{syncStatus.message}</p>}
         </Card>
       )}
 
@@ -1606,8 +1764,17 @@ export default function App() {
   const [sheetData, setSheetData] = useState(null);     // live data fetched from Google Sheets
   const [sheetLoading, setSheetLoading] = useState(false);
 
-  const [students, setStudents] = useState(initialStudents);
-  const [staff, setStaff] = useState(initialStaff);
+  const [students, setStudents] = useState(() => readSavedList("smac-portal.students.v1", initialStudents).map(({ gender, ...student }) => student));
+  const [staff, setStaff] = useState(() => readSavedList("smac-portal.staff.v1", initialStaff));
+  const [syncStatus, setSyncStatus] = useState({ loading: false, message: "", error: false });
+
+  useEffect(() => {
+    try { localStorage.setItem("smac-portal.students.v1", JSON.stringify(students)); } catch (error) { console.error("Could not save student profiles:", error); }
+  }, [students]);
+
+  useEffect(() => {
+    try { localStorage.setItem("smac-portal.staff.v1", JSON.stringify(staff)); } catch (error) { console.error("Could not save staff profiles:", error); }
+  }, [staff]);
 
   // All totals prefer live Sheets data; fall back to demo constants when not yet synced
   const subjectMarksLive = sheetData?.subjectMarks ?? SUBJECT_MARKS;
@@ -1643,7 +1810,41 @@ export default function App() {
     }
   }
 
-  function loginAdmin() {
+  function changeParentPassword(nextPassword) {
+    const updated = { ...activeStudent, password: nextPassword };
+    setStudents((current) => current.map((item) => item.admissionNo === updated.admissionNo ? updated : item));
+    setActiveStudent(updated);
+  }
+
+  async function syncSheets() {
+    setSyncStatus({ loading: true, message: "Checking Google Sheets…", error: false });
+    const connection = await testSheetsConnection();
+    if (!connection.success) {
+      setSyncStatus({ loading: false, message: connection.message, error: true });
+      return;
+    }
+    try {
+      const data = await fetchAllSheetData();
+      const existing = new Map(students.map((student) => [String(student.admissionNo).trim(), student]));
+      const imported = data.students.filter((row) => row.AdmissionNo?.trim()).map((row) => {
+        const admissionNo = row.AdmissionNo.trim();
+        const previous = existing.get(admissionNo) || {};
+        const klass = CLASS_LIST.includes(row.Class) ? row.Class : previous.class || "S1";
+        const roll = Number(row.RollNo || row.RollNumber || previous.rollNo) || nextRollNo(students, klass);
+        const username = previous.username && previous.username !== previous.admissionNo ? previous.username : row.StudentUsername?.trim() || admissionNo;
+        const password = previous.password && previous.password !== previous.admissionNo ? previous.password : row.StudentPassword || admissionNo;
+        return { ...previous, admissionNo, enrollmentNo: row.EnrollmentNo?.trim() || previous.enrollmentNo || "", username, name: row.StudentName?.trim() || previous.name || "", class: klass, division: row.Division?.trim() || previous.division || "A", year: row.AcademicYear?.trim() || previous.year || "2026-27", rollNo: roll, parentName: row.ParentName?.trim() || row.GuardianName?.trim() || previous.parentName || "", parentPhone: row.ParentPhone?.trim() || previous.parentPhone || "", password, active: row.Status?.toLowerCase() === "inactive" ? false : previous.active ?? true };
+      });
+      const importedNos = new Set(imported.map((student) => student.admissionNo));
+      setStudents((current) => [...current.filter((student) => !importedNos.has(student.admissionNo)), ...imported]);
+      setSyncStatus({ loading: false, message: `Synced ${imported.length} student profiles and confirmed the academic-data tabs are reachable.`, error: false });
+    } catch (error) {
+      setSyncStatus({ loading: false, message: error?.message || "Unable to sync Google Sheets.", error: true });
+    }
+  }
+
+  async function loginAdmin(username, password) {
+    await authenticatePortalAdmin(username, password);
     setUser("admin");
     setTab("overview");
   }
@@ -1713,7 +1914,7 @@ export default function App() {
               ? [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["admin", "Admin Panel"]]
               : user === "teacher"
               ? [["overview", "My Profile"], ["teachers", "Staff Directory"]]
-              : [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["remarks", "Remarks"]]
+              : [["overview", "Overview"], ["grace", "Grace Marks"], ["teachers", "Teachers"], ["remarks", "Remarks"], ["account", "Account"]]
             ).map(([key, label]) => (
               <button
                 key={key}
@@ -1846,8 +2047,9 @@ export default function App() {
           )}
           {tab === "teachers" && user !== "teacher" && <TeacherDirectory staff={staff} />}
           {tab === "remarks" && user !== "teacher" && <TeacherRemarks remarks={remarksLive} />}
+          {tab === "account" && user === "parent" && activeStudent && <ParentAccount student={activeStudent} onChangePassword={changeParentPassword} />}
           {tab === "admin" && user === "admin" && (
-            <AdminPanel students={students} setStudents={setStudents} staff={staff} setStaff={setStaff} />
+            <AdminPanel students={students} setStudents={setStudents} staff={staff} setStaff={setStaff} onSyncSheets={syncSheets} syncStatus={syncStatus} />
           )}
         </main>
 

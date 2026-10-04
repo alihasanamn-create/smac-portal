@@ -2,220 +2,508 @@
 // src/sheetsApi.js
 // Google Sheets API integration for SMAC Portal
 //
-// HOW IT WORKS:
-//   Teachers fill a Google Sheet → this file fetches it →
-//   the app auto-updates student marks, grace marks, attendance.
+// Google Sheet tabs:
+//   Students
+//   Marks
+//   GraceMarks
+//   Attendance
+//   Remarks
 //
-// SETUP STEPS are in GOOGLE_SHEETS_SETUP.md (included in zip)
+// Configuration is loaded from .env
 // ============================================================
 
-// ─── PASTE YOUR VALUES HERE ─────────────────────────────────
-const SHEET_ID   = "YOUR_GOOGLE_SHEET_ID";   // from the sheet URL
-const API_KEY    = "YOUR_GOOGLE_API_KEY";     // from Google Cloud Console
-// ─────────────────────────────────────────────────────────────
+const SHEET_ID = import.meta.env.VITE_GOOGLE_SHEET_ID;
+const API_KEY = import.meta.env.VITE_GOOGLE_SHEETS_API_KEY;
 
 const BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 
-// ── low-level: fetch one named range from the sheet ──────────
-async function fetchRange(sheetName, range = "") {
-  const ref = range ? `${sheetName}!${range}` : sheetName;
-  const url = `${BASE}/${SHEET_ID}/values/${encodeURIComponent(ref)}?key=${API_KEY}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `Sheets API error ${res.status}`);
+// ============================================================
+// CONFIGURATION CHECK
+// ============================================================
+
+export function getSheetsConfig() {
+  return {
+    sheetId: SHEET_ID,
+    apiKeyConfigured: Boolean(API_KEY),
+  };
+}
+
+function validateConfig() {
+  if (!SHEET_ID) {
+    throw new Error(
+      "Google Sheet ID is missing. Check VITE_GOOGLE_SHEET_ID in your .env file."
+    );
   }
-  const data = await res.json();
-  return data.values || [];   // array of arrays (rows × cols)
-}
 
-// ── turn raw rows into objects using first row as header ──────
-function rowsToObjects(rows) {
-  if (!rows || rows.length < 2) return [];
-  const [headers, ...body] = rows;
-  return body.map((row) =>
-    Object.fromEntries(headers.map((h, i) => [h.trim(), (row[i] ?? "").trim()]))
-  );
+  if (!API_KEY) {
+    throw new Error(
+      "Google Sheets API key is missing. Check VITE_GOOGLE_SHEETS_API_KEY in your .env file."
+    );
+  }
 }
-
-// ── helper: parse a number or return 0 ───────────────────────
-const num = (v) => parseFloat(v) || 0;
 
 // ============================================================
-// PUBLIC API
+// LOW LEVEL: FETCH ONE SHEET TAB
+// ============================================================
+
+async function fetchRange(sheetName, range = "") {
+  validateConfig();
+
+  const ref = range
+    ? `${sheetName}!${range}`
+    : sheetName;
+
+  const url =
+    `${BASE}/${SHEET_ID}/values/` +
+    `${encodeURIComponent(ref)}` +
+    `?key=${encodeURIComponent(API_KEY)}`;
+
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+
+    const message =
+      err?.error?.message ||
+      `Google Sheets API error ${res.status}`;
+
+    throw new Error(
+      `Unable to read "${sheetName}": ${message}`
+    );
+  }
+
+  const data = await res.json();
+
+  return data.values || [];
+}
+
+// ============================================================
+// CONVERT ROWS → OBJECTS
+// ============================================================
+
+function rowsToObjects(rows) {
+  if (!rows || rows.length < 2) {
+    return [];
+  }
+
+  const [headers, ...body] = rows;
+
+  return body.map((row) => {
+    const object = {};
+
+    headers.forEach((header, index) => {
+      const key = String(header || "").trim();
+
+      if (!key) return;
+
+      object[key] = String(row[index] ?? "").trim();
+    });
+
+    return object;
+  });
+}
+
+// ============================================================
+// NUMBER HELPER
+// ============================================================
+
+const num = (value) => {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+// ============================================================
+// STUDENTS
 // ============================================================
 
 /**
- * Fetch all student marks from the "Marks" sheet tab.
+ * Fetch all students from "Students".
  *
- * Expected columns (row 1 = header):
- *   AdmissionNo | StudentName | Class | Subject | InternalMarks | MaxMarks
+ * Expected columns:
+ *
+ * AdmissionNo
+ * EnrollmentNo
+ * StudentName
+ * Class
+ * Division
+ * ParentName
+ * ParentPhone
+ * StudentUsername
+ * StudentPassword
+ * Status
+ */
+
+export async function fetchStudents() {
+  const rows = await fetchRange("Students");
+  return rowsToObjects(rows);
+}
+
+// ============================================================
+// MARKS
+// ============================================================
+
+/**
+ * Fetch all student marks.
+ *
+ * Expected columns:
+ *
+ * AdmissionNo
+ * StudentName
+ * Class
+ * Subject
+ * InternalMarks
+ * MaxMarks
  *
  * Returns:
- *   Map<admissionNo, { name, class, subjects: [{ subject, marks, max }] }>
+ * Map<admissionNo, {
+ *   name,
+ *   class,
+ *   subjects: []
+ * }>
  */
+
 export async function fetchMarks() {
   const rows = await fetchRange("Marks");
   const records = rowsToObjects(rows);
 
   const map = new Map();
-  for (const r of records) {
-    const id = r.AdmissionNo;
+
+  for (const record of records) {
+    const id = record.AdmissionNo;
+
     if (!id) continue;
+
     if (!map.has(id)) {
       map.set(id, {
-        name: r.StudentName,
-        class: r.Class,
+        name: record.StudentName || "",
+        class: record.Class || "",
         subjects: [],
       });
     }
+
     map.get(id).subjects.push({
-      subject: r.Subject,
-      marks: num(r.InternalMarks),
-      max: num(r.MaxMarks),
+      subject: record.Subject || "",
+      marks: num(record.InternalMarks),
+      max: num(record.MaxMarks),
     });
   }
+
   return map;
 }
 
+// ============================================================
+// GRACE MARKS
+// ============================================================
+
 /**
- * Fetch grace marks from the "GraceMarks" sheet tab.
- *
  * Expected columns:
- *   AdmissionNo | Week | Category | ObtainedMarks | MaxMarks
  *
- * Returns:
- *   Map<admissionNo, { byWeek: { weekLabel: { category: obtained } }, maxPerCategory: { category: max } }>
+ * AdmissionNo
+ * Week
+ * Category
+ * ObtainedMarks
+ * MaxMarks
  */
+
 export async function fetchGraceMarks() {
   const rows = await fetchRange("GraceMarks");
   const records = rowsToObjects(rows);
 
   const map = new Map();
-  for (const r of records) {
-    const id = r.AdmissionNo;
+
+  for (const record of records) {
+    const id = record.AdmissionNo;
+
     if (!id) continue;
-    if (!map.has(id)) map.set(id, { byWeek: {}, maxPerCategory: {} });
+
+    if (!map.has(id)) {
+      map.set(id, {
+        byWeek: {},
+        maxPerCategory: {},
+      });
+    }
+
     const entry = map.get(id);
 
-    const week = r.Week || "Week 1";
-    if (!entry.byWeek[week]) entry.byWeek[week] = {};
-    entry.byWeek[week][r.Category] = num(r.ObtainedMarks);
-    entry.maxPerCategory[r.Category] = num(r.MaxMarks);
+    const week = record.Week || "Week 1";
+    const category = record.Category || "General";
+
+    if (!entry.byWeek[week]) {
+      entry.byWeek[week] = {};
+    }
+
+    entry.byWeek[week][category] =
+      num(record.ObtainedMarks);
+
+    entry.maxPerCategory[category] =
+      num(record.MaxMarks);
   }
+
   return map;
 }
 
+// ============================================================
+// ATTENDANCE
+// ============================================================
+
 /**
- * Fetch attendance from "Attendance" sheet tab.
- *
  * Expected columns:
- *   AdmissionNo | TotalDays | PresentDays
  *
- * Returns:
- *   Map<admissionNo, { totalDays, presentDays, percent }>
+ * AdmissionNo
+ * TotalDays
+ * PresentDays
  */
+
 export async function fetchAttendance() {
   const rows = await fetchRange("Attendance");
   const records = rowsToObjects(rows);
 
   const map = new Map();
-  for (const r of records) {
-    const id = r.AdmissionNo;
+
+  for (const record of records) {
+    const id = record.AdmissionNo;
+
     if (!id) continue;
-    const total   = num(r.TotalDays);
-    const present = num(r.PresentDays);
+
+    const total = num(record.TotalDays);
+    const present = num(record.PresentDays);
+
     map.set(id, {
       totalDays: total,
       presentDays: present,
-      percent: total > 0 ? ((present / total) * 100).toFixed(1) : "0.0",
+      percent:
+        total > 0
+          ? ((present / total) * 100).toFixed(1)
+          : "0.0",
     });
   }
+
   return map;
 }
 
+// ============================================================
+// REMARKS
+// ============================================================
+
 /**
- * Fetch teacher remarks from "Remarks" sheet tab.
- *
  * Expected columns:
- *   AdmissionNo | Strengths | Improvement | Suggestions
  *
- * Returns:
- *   Map<admissionNo, { strengths, improvement, suggestions }>
+ * AdmissionNo
+ * Strengths
+ * Improvement
+ * Suggestions
  */
+
 export async function fetchRemarks() {
   const rows = await fetchRange("Remarks");
   const records = rowsToObjects(rows);
 
   const map = new Map();
-  for (const r of records) {
-    const id = r.AdmissionNo;
+
+  for (const record of records) {
+    const id = record.AdmissionNo;
+
     if (!id) continue;
+
     map.set(id, {
-      strengths:   r.Strengths   || "",
-      improvement: r.Improvement || "",
-      suggestions: r.Suggestions || "",
+      strengths: record.Strengths || "",
+      improvement: record.Improvement || "",
+      suggestions: record.Suggestions || "",
     });
   }
+
   return map;
 }
 
-/**
- * Fetch ALL data for one student in one go.
- * Returns null if no marks row found for that admission number.
- */
-export async function fetchStudentData(admissionNo) {
-  const [marksMap, graceMap, attendanceMap, remarksMap] = await Promise.all([
+// ============================================================
+// FETCH ALL PORTAL DATA
+// ============================================================
+
+export async function fetchAllSheetData() {
+  const [
+    students,
+    marks,
+    graceMarks,
+    attendance,
+    remarks,
+  ] = await Promise.all([
+    fetchStudents(),
     fetchMarks(),
     fetchGraceMarks(),
     fetchAttendance(),
     fetchRemarks(),
   ]);
 
-  const marks      = marksMap.get(admissionNo);
-  const grace      = graceMap.get(admissionNo);
-  const attendance = attendanceMap.get(admissionNo);
-  const remarks    = remarksMap.get(admissionNo);
+  return {
+    students,
+    marks,
+    graceMarks,
+    attendance,
+    remarks,
+  };
+}
 
-  if (!marks) return null;
+// ============================================================
+// FETCH ONE STUDENT
+// ============================================================
 
-  // compute totals
-  const totalInternal = marks.subjects.reduce((a, s) => a + s.marks, 0);
-  const maxInternal   = marks.subjects.reduce((a, s) => a + s.max,   0);
+export async function fetchStudentData(admissionNo) {
+  const [
+    marksMap,
+    graceMap,
+    attendanceMap,
+    remarksMap,
+  ] = await Promise.all([
+    fetchMarks(),
+    fetchGraceMarks(),
+    fetchAttendance(),
+    fetchRemarks(),
+  ]);
 
-  const graceObtained     = {};
-  const graceMax          = grace?.maxPerCategory || {};
-  const weeklyGrace       = [];
+  const id = String(admissionNo).trim();
+
+  const marks = marksMap.get(id);
+  const grace = graceMap.get(id);
+  const attendance = attendanceMap.get(id);
+  const remarks = remarksMap.get(id);
+
+  if (!marks) {
+    return null;
+  }
+
+  // ----------------------------------------------------------
+  // INTERNAL MARKS
+  // ----------------------------------------------------------
+
+  const totalInternal = marks.subjects.reduce(
+    (total, subject) => total + subject.marks,
+    0
+  );
+
+  const maxInternal = marks.subjects.reduce(
+    (total, subject) => total + subject.max,
+    0
+  );
+
+  // ----------------------------------------------------------
+  // GRACE MARKS
+  // ----------------------------------------------------------
+
+  const graceObtained = {};
+  const graceMax = grace?.maxPerCategory || {};
+  const weeklyGrace = [];
 
   if (grace) {
-    for (const [week, cats] of Object.entries(grace.byWeek)) {
+    for (const [week, categories] of Object.entries(
+      grace.byWeek
+    )) {
       let weekTotal = 0;
-      for (const [cat, val] of Object.entries(cats)) {
-        graceObtained[cat] = (graceObtained[cat] || 0) + val;
-        weekTotal += val;
+
+      for (const [category, value] of Object.entries(
+        categories
+      )) {
+        graceObtained[category] =
+          (graceObtained[category] || 0) + value;
+
+        weekTotal += value;
       }
-      weeklyGrace.push({ week, marks: weekTotal });
+
+      weeklyGrace.push({
+        week,
+        marks: weekTotal,
+      });
     }
   }
 
-  const totalGrace = Object.values(graceObtained).reduce((a, b) => a + b, 0);
-  const maxGrace   = Object.values(graceMax).reduce((a, b) => a + b, 0);
+  const totalGrace = Object.values(graceObtained).reduce(
+    (total, value) => total + value,
+    0
+  );
 
-  const internalPct = maxInternal > 0 ? totalInternal / maxInternal : 0;
-  const gracePct    = maxGrace    > 0 ? totalGrace    / maxGrace    : 0;
-  const overallPct  = Number((((internalPct + gracePct) / 2) * 100).toFixed(1));
+  const maxGrace = Object.values(graceMax).reduce(
+    (total, value) => total + value,
+    0
+  );
+
+  // ----------------------------------------------------------
+  // PERCENTAGES
+  // ----------------------------------------------------------
+
+  const internalPct =
+    maxInternal > 0
+      ? totalInternal / maxInternal
+      : 0;
+
+  const gracePct =
+    maxGrace > 0
+      ? totalGrace / maxGrace
+      : 0;
+
+  const overallPct = Number(
+    (((internalPct + gracePct) / 2) * 100).toFixed(1)
+  );
+
+  // ----------------------------------------------------------
+  // FINAL STUDENT DATA
+  // ----------------------------------------------------------
 
   return {
-    subjectMarks:   marks.subjects,
+    admissionNo: id,
+
+    studentName: marks.name,
+    class: marks.class,
+
+    subjectMarks: marks.subjects,
+
     totalInternal,
     maxInternal,
+
     graceObtained,
     graceMax,
+
     totalGrace,
     maxGrace,
+
     weeklyGrace,
+
     overallPct,
-    attendance: attendance ?? { percent: "—" },
-    remarks:    remarks   ?? { strengths: "", improvement: "", suggestions: "" },
+
+    attendance:
+      attendance || {
+        totalDays: 0,
+        presentDays: 0,
+        percent: "—",
+      },
+
+    remarks:
+      remarks || {
+        strengths: "",
+        improvement: "",
+        suggestions: "",
+      },
   };
+}
+
+// ============================================================
+// TEST CONNECTION
+// ============================================================
+
+export async function testSheetsConnection() {
+  try {
+    validateConfig();
+
+    await fetchRange("Students", "A1:H2");
+
+    return {
+      success: true,
+      message: "Google Sheets connected successfully.",
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message:
+        error?.message ||
+        "Unable to connect to Google Sheets.",
+    };
+  }
 }
